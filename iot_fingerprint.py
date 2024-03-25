@@ -26,14 +26,13 @@ Example: ./iot_fingerprint.py -d captures_IoT_Sentinel/captures_IoT-Sentinel/ -o
 
 import datetime
 import time
-import dpkt
 import sys
 import getopt
 import socket
 import pandas
+from scapy.all import *
 import glob, os
 from struct import *
-
 
 """
     Features applied to each packet %12
@@ -46,6 +45,10 @@ from struct import *
         
 """
 
+ICMP = 1
+TCP = 6
+UDP = 17
+ICMP6 = 58
 
 def create_outputdir(outputdir,device_label):
 
@@ -96,11 +99,11 @@ def parse_pcap(outputdir,capture,device_label,id_pcap):
 
     #Open the given passed pcap/capture to feed the buffer
     i_counter=0
-    f = open(capture)
-    pcap = dpkt.pcap.Reader(f)
+    pcap_file = rdpcap(capture)
+    print(pcap_file)
 
 
-    for ts, buf in pcap:
+    for packet in pcap_file:
 
     #Variables assignment
 
@@ -138,41 +141,40 @@ def parse_pcap(outputdir,capture,device_label,id_pcap):
         i_counter+=1
         
         #Assign ethernet buffer value to eth
-        eth = dpkt.ethernet.Ethernet(buf)
-        ip = eth.data
-
-        
+        eth = packet.getlayer("Ether")
+        ip = packet.getlayer("IP")        
 
         #Network Layer IP
-        if eth.type == dpkt.ethernet.ETH_TYPE_IP:
+        if eth == None:
+            print ('\n\n None Type Ethernet Layer not supported \n')
+            continue
+        elif "IP" in packet:
             L3_ip = 1
 
             #Get packet size
-            pck_size = len(ip.data)
+            pck_size = ip.len
 
             #Check router alert (HL has to be above 5 and ip.opts == '\x94\x04\x00\x00')
-            if ip.hl > 5:
-                if ip.opts == dpkt.ip.IP_OPT_RALERT:
+            if ip.ihl > 5:
+                print(ip.fields, ip.options)
+                if len(ip.options) > 0:
                     ip_ralert=1
 
             #Check new destination IP
-            ip_dst_new=ip_to_str(ip.dst)
-            L3_ip_dst,L3_ip_dst_count=get_dest_ip_counter(ip_dst_new)
-
-
-            tcp = ip.data
-            udp = ip.data
+            # ip_dst_new=ip.dst
+            L3_ip_dst,L3_ip_dst_count = get_dest_ip_counter(ip.dst)
             
         #Network Layer ICMP-ICMP6     
-            if type(ip.data) == dpkt.icmp.ICMP:
+            if ip.proto == ICMP:
                 L3_icmp = 1
-            if type(ip.data) == dpkt.icmp6.ICMP6:
+            if ip.proto == ICMP6:
                 L3_icmp6 = 1
-            if type(ip.data) == dpkt.ip.IP_PROTO_RAW:
+            if Raw in packet:
                 pck_rawdata = 1
         
         #Transport UDP DHCP-DNS-MDNS-SSDP-NTP
-            if type(ip.data) == dpkt.udp.UDP:
+            if ip.proto == UDP:
+                udp = ip.getlayer("UDP")
                 L4_udp = 1
                 port_class_src = port_class_def(udp.sport)
                 port_class_dst = port_class_def(udp.dport)
@@ -190,7 +192,8 @@ def parse_pcap(outputdir,capture,device_label,id_pcap):
                     L7_ntp = 1
         
         #Transport TCP HTTP-HTTPS
-            if type(ip.data) == dpkt.tcp.TCP:
+            if ip.proto == TCP:
+                tcp = ip.getlayer("TCP")
                 L4_tcp = 1
                 port_class_src = port_class_def(tcp.sport)
                 port_class_dst = port_class_def(tcp.dport)
@@ -200,19 +203,16 @@ def parse_pcap(outputdir,capture,device_label,id_pcap):
                 if tcp.sport == 443 or tcp.dport == 443:
                      L7_https = 1
 
-        elif eth.type != dpkt.ethernet.ETH_TYPE_IP:
-        
         #Data Link ARP-LLC
-            if eth.type == dpkt.ethernet.ETH_TYPE_ARP:
-                L2_arp = 1            
-            if eth.type == dpkt.llc.LLC:
-                L2_llc= 1
-        
+        elif "ARP" in packet:
+            L2_arp = 1            
+        elif "LLC" in packet:
+            L2_llc= 1
         #Network EAPoL
-            if eth.type == dpkt.ethernet.ETH_TYPE_EAPOL:
-                L3_eapol = 1
+        elif "EAPOL" in packet: # EAPOL
+            L3_eapol = 1
         else:
-            print (i,'\n\nNon IP Packet type not supported  %s\n') % eth.data.__class__.__name__
+            print ('\n\nNon IP Packet type not supported  %s\n' % eth)
             continue
 
     #Create the array containing the 23 features
@@ -233,11 +233,9 @@ def parse_pcap(outputdir,capture,device_label,id_pcap):
         #Display features per packet
         print (ar2)
         print ('\n')
-    
-    f.close()
-
 
 def main(argv):
+
 
 
     version='IoT_Sentinel parse_pcap v1.0'
@@ -256,11 +254,11 @@ def main(argv):
     try:
         opts, args = getopt.getopt(argv,"hd:o:i:l:",["idir=","odir=","ifile=","label="])
     except getopt.GetoptError:
-        print version+'\nusage:\tparse_pcap.py -d <inputdir> [or] -i <inputpcap> -l <label> [and] -o <outputdir>'
+        print(version+'\nusage:\tparse_pcap.py -d <inputdir> [or] -i <inputpcap> -l <label> [and] -o <outputdir>')
         sys.exit(2)
     for opt, arg in opts:
         if opt == '-h':
-            print version+'\nusage:\tparse_pcap.py -d <inputdir> [or] -i <inputpcap> -l <label> [and] -o <outputdir>'
+            print(version+'\nusage:\tparse_pcap.py -d <inputdir> [or] -i <inputpcap> -l <label> [and] -o <outputdir>')
             sys.exit()
         elif opt in ("-d", "--dir"):
             op = 1
@@ -278,24 +276,25 @@ def main(argv):
 
 
 
-    print 'IoT_Sentinel: parse_pcap.py v1.0\n'
+    print('IoT_Sentinel: parse_pcap.py v1.0\n')
     i = 0
     id_pcap=0
     while i < len(device_label):
         if op == 1:    
             filename_path=inputdir+device_label[i]+'/*.pcap'
-            print '\nINPUTDIR: ',inputdir
-            print '\nOUTPUTDIR: ',outputdir
-            print '\nDEVICE TESTED:\n'+str(device_label)+'\n\n'
+            print('\nINPUTDIR: ',inputdir)
+            print('\nOUTPUTDIR: ',outputdir)
+            print('\nDEVICE TESTED:\n'+str(device_label)+'\n\n')
         elif op == 2:
             filename_path=inputpcap
-            print '\nINPUTPCAP: ',inputdir
-            print '\nOUTPUTDIR: ',outputdir
-            print '\nDEVICE TESTED:\n'+str(device_label)
+            print('\nINPUTPCAP: ',inputdir)
+            print('\nOUTPUTDIR: ',outputdir)
+            print('\nDEVICE TESTED:\n'+str(device_label))
 
-        print '\nSTARTING...\n' 
+        print('\nSTARTING...\n' )
 
         for filename in glob.glob(filename_path):
+            
             if os.path.isfile(filename):
                 del L3_ip_dst_set[:]
                 L3_ip_dst_counter = 1 
